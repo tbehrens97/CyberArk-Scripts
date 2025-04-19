@@ -27,9 +27,10 @@ This PowerShell script automates the maintenance and upgrade process of **CyberA
 Before running the script, ensure you have:
 
 - **PowerShell version 5.1** or later.
-- Administrative privileges on the Linux servers.
+- sudo privileges on the Linux servers.
 - CyberArk RPM files located locally.
 - Necessary GPG keys (`RPM-GPG-KEY-CyberArk`) available locally. https://community.cyberark.com/s/public-key 
+- To access PSMP servers https://github.com/darkoperator/Posh-SSH/tree/master must be installed
 
 ## Usage
 
