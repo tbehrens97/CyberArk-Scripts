@@ -1,6 +1,33 @@
 ﻿
+function Get-FileName($initialDirectory)
+{   
+    [System.Reflection.Assembly]::LoadWithPartialName("System.windows.forms") |
+    Out-Null
 
-$TargetEdgeVersion="133.0.3065.82"
+    $OpenFileDialog = New-Object System.Windows.Forms.OpenFileDialog
+    $OpenFileDialog.initialDirectory = $initialDirectory
+    $OpenFileDialog.filter = "MicrosoftEdge (*.msi)| MicrosoftEdge*.msi"
+    $OpenFileDialog.ShowDialog() | Out-Null
+    $OpenFileDialog.filename
+}
+
+$FileName=Get-FileName
+
+$filePath   = "$FileName"
+$parentPath = (Resolve-Path -Path (Split-Path -Path $filePath)).Path
+$fileName   = Split-Path -Path $filePath -Leaf
+
+$shell = New-Object -COMObject Shell.Application
+$shellFolder = $Shell.NameSpace($parentPath)
+$shellFile   = $ShellFolder.ParseName($fileName)
+
+$shellFolder.GetDetailsOf($shellFile,24)
+
+$Version=$shellFolder.GetDetailsOf($shellFile,24)
+
+$VersionNumber = $Version -split ' ' | Select-Object -First 1
+
+$TargetEdgeVersion=$VersionNumber
 
 $ActiveServers = @(
     #PSM
@@ -21,7 +48,7 @@ foreach ($Server in $ActiveServers) {
 
     if ($EdgeVersion.ProductVersion -gt $TargetEdgeVersion) {
         Echo "Copying Edge MSI to $Server"
-        Copy-Item "C:\Users\$env:username\Desktop\MicrosoftEdgeEnterpriseX86.msi" -Destination "\\$server\C$\MicrosoftEdgeEnterpriseX86.msi"
+        Copy-Item "$FileName" -Destination "\\$server\C$\MicrosoftEdgeEnterpriseX86.msi"
         Invoke-Command -Session $Session -ScriptBlock {Get-Process "msedge" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue}
         echo "Running downgrade for Edge on $Server"
         start-sleep 2
@@ -42,6 +69,9 @@ foreach ($Server in $ActiveServers) {
     }
 }
 
+
+#This will undo the upgrade block for edge
+<#
 foreach ($Server in $ActiveServers) {
     $Session = New-PSSession -ComputerName $Server
     Invoke-Command -Session $Session -ScriptBlock {
@@ -59,11 +89,10 @@ foreach ($Server in $ActiveServers) {
     Echo "Stopping edge on $Server"
     Invoke-Command -Session $Session -ScriptBlock {Get-Process "msedge" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue}
     Echo "Copying edge to $Server"
-    Copy-Item "C:\Users\$env:username\Desktop\MicrosoftEdgeEnterpriseX86.msi" -Destination "\\$server\C$\MicrosoftEdgeEnterpriseX86.msi"
+    Copy-Item "$FileName" -Destination "\\$server\C$\MicrosoftEdgeEnterpriseX86.msi"
     Echo "Installing edge on $Server"
     Invoke-Command -Session $Session -ScriptBlock {msiexec /I C:\MicrosoftEdgeEnterpriseX86.msi /qn}
     Invoke-Command -Session $Session -ScriptBlock {Remove-Item C:\MicrosoftEdgeEnterpriseX86.msi}
     Echo ""
 }
-
-.\UpdateEdgeWebDriver.ps1
+#>
