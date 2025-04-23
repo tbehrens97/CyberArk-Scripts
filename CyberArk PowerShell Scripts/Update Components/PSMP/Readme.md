@@ -30,7 +30,7 @@ This PowerShell script streamlines the process of maintaining and updating Cyber
 Before running this script, ensure you have:
 
 - PowerShell version 5.1 or later installed.
-- sudo access to the Linux servers.
+- sudo access to the Linux servers NOPASSWD.
 - The PSMP zip file (`PrivilegedSessionManagerSSHProxy*.zip`) available locally.
 - Necessary GPG keys (`RPM-GPG-KEY-CyberArk`) available locally. https://community.cyberark.com/s/public-key
 - To access PSMP servers https://github.com/darkoperator/Posh-SSH/tree/master must be installed
