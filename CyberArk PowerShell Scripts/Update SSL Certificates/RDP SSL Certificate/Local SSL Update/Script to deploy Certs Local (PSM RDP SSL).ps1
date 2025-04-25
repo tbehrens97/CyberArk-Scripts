@@ -17,7 +17,7 @@ $FileName=Get-FileName
 #Get Cert password
 $cred=Read-Host "Enter The Certificate Password" -AsSecureString
 
-$CertData=Get-PfxData -FilePath $outputPath -Password $cred
+$CertData=Get-PfxData -FilePath $FileName -Password $cred
 
 $CertThumb=$CertData.EndEntityCertificates | select Thumbprint
 #Cert thumprint
