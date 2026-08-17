@@ -1,0 +1,31 @@
+# --- Secrets / environment-specific (NEVER commit) ---
+# Copy start.cmd to a local, git-ignored launcher and put real values there:
+start.local.cmd
+*.local.cmd
+.env
+
+# Bundled third-party binaries (do not redistribute)
+bin/ffmpeg.exe
+bin/getSAMLResponse.exe
+bin/*.exe
+Python/
+Python3*/
+
+# Runtime cache / transcoded media
+cache/
+psmcache/
+*.download
+*.tmp.mp4
+*.h264.mp4
+*.idle.json
+*.meta.json
+
+# Python
+__pycache__/
+*.pyc
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

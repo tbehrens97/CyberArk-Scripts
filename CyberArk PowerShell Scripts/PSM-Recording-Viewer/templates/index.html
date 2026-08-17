@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<title>CyberArk PSM Recording Viewer</title>
+<style>
+  :root { --bg:#0f141a; --panel:#171f28; --line:#26313d; --text:#e6edf3; --muted:#8b98a5;
+          --accent:#1f9cf0; --risk:#e5534b; --ok:#3fb950; --idle:#8957e5; --warn:#e3b341; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 "Segoe UI",Roboto,Arial,sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; gap:12px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:15px; margin:0; font-weight:600; white-space:nowrap; }
+  header .sp { flex:1; }
+  .tag { font-size:11px; padding:2px 7px; border-radius:10px; background:#26313d; color:var(--muted); white-space:nowrap; }
+  .tag.on { background:#16341f; color:var(--ok); } .tag.off { background:#3a1c1c; color:var(--risk); }
+  .tag.warn { background:#3a2f12; color:var(--warn); }
+  .dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; }
+  .dot.g { background:var(--ok); } .dot.y { background:var(--warn); }
+  .muted { color:var(--muted); }
+  button { background:var(--accent); color:#fff; border:0; border-radius:4px; padding:7px 13px; cursor:pointer; font-size:13px; }
+  button.ghost { background:#26313d; }
+  button:disabled { opacity:.45; cursor:default; }
+  input, select, textarea { background:#0d1218; color:var(--text); border:1px solid var(--line); border-radius:4px; padding:6px 8px; font-size:13px; font-family:inherit; }
+  textarea { font-family:Consolas,monospace; font-size:11px; resize:vertical; }
+
+  .wrap { display:grid; grid-template-columns: minmax(560px,1.6fr) minmax(400px,1fr); gap:12px; padding:12px; align-items:start; }
+  body.playing .wrap { grid-template-columns: minmax(300px,0.62fr) minmax(680px,2fr); }
+  body.theater .wrap { grid-template-columns: 1fr; }
+  body.theater #listCol { display:none; }
+  .wrap > div { min-width:0; }
+
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:6px; }
+  .card h2 { font-size:13px; margin:0; padding:9px 12px; border-bottom:1px solid var(--line); font-weight:600; display:flex; align-items:center; gap:8px; }
+  .card h2 .sp { flex:1; } .card h2 button { padding:3px 8px; font-size:11px; }
+  .pad { padding:12px; }
+  .filters { display:flex; flex-wrap:wrap; gap:8px; align-items:end; }
+  .filters label { display:flex; flex-direction:column; gap:3px; font-size:11px; color:var(--muted); text-transform:uppercase; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px; }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; cursor:pointer; user-select:none; }
+  tbody tr:hover { background:#1e2733; cursor:pointer; } tbody tr.sel { background:#1d3549; }
+  .risk { font-weight:700; } .risk.hi { color:var(--risk); }
+  body.playing:not(.theater) #listCol th:nth-child(4), body.playing:not(.theater) #listCol td:nth-child(4),
+  body.playing:not(.theater) #listCol th:nth-child(6), body.playing:not(.theater) #listCol td:nth-child(6),
+  body.playing:not(.theater) #listCol th:nth-child(8), body.playing:not(.theater) #listCol td:nth-child(8) { display:none; }
+
+  .vidwrap { position:relative; background:#000; border-radius:4px; display:inline-block; max-width:100%; }
+  video { width:100%; display:block; background:#000; border-radius:4px; max-height:38vh; transition:max-height .18s ease; }
+  body.playing video { max-height:64vh; } body.theater video { max-height:78vh; }
+  body.vidresized .vidwrap { width:var(--vidw, 100%); }
+  body.vidresized video { height:var(--vidh); width:100%; max-height:none; transition:none; }
+  .toast { position:absolute; right:10px; top:44px; background:rgba(137,87,229,.94); color:#fff; font-size:12px; padding:5px 10px; border-radius:12px; opacity:0; transition:opacity .25s; pointer-events:none; }
+  .toast.show { opacity:1; }
+  .corner { position:absolute; right:0; bottom:0; width:22px; height:22px; cursor:nwse-resize;
+            z-index:5; touch-action:none; opacity:.55; transition:opacity .15s; border-bottom-right-radius:4px;
+            background: linear-gradient(135deg, transparent 0 46%, var(--muted) 46% 54%, transparent 54% 66%, var(--muted) 66% 74%, transparent 74% 86%, var(--muted) 86% 94%, transparent 94%); }
+  .vidwrap:hover .corner { opacity:.9; } .corner:hover { opacity:1; }
+  body.resizing { cursor:nwse-resize; user-select:none; }
+  body.resizing iframe, body.resizing video { pointer-events:none; }
+  .vidclose { position:absolute; top:8px; right:8px; z-index:6; width:26px; height:26px; padding:0;
+              border-radius:50%; background:rgba(6,9,13,.6); color:#fff; border:1px solid var(--line);
+              font-size:14px; line-height:1; display:none; align-items:center; justify-content:center; cursor:pointer; }
+  .vidclose:hover { background:rgba(229,83,75,.9); border-color:transparent; }
+  body.playing .vidwrap:hover .vidclose { display:flex; }
+
+  dl { display:grid; grid-template-columns:auto 1fr; gap:4px 10px; margin:0; font-size:13px; }
+  dt { color:var(--muted); } dd { margin:0; word-break:break-word; }
+  .acts { max-height:180px; overflow:auto; font-family:Consolas,monospace; font-size:12px; }
+  .acts div { padding:3px 0; border-bottom:1px solid #1f2833; }
+  pre.raw { max-height:280px; overflow:auto; background:#0d1218; padding:10px; border-radius:4px; font-size:11px; margin:0; white-space:pre-wrap; word-break:break-all; }
+  pre.errlog { max-height:200px; overflow:auto; background:#0d1218; padding:8px; border-radius:4px; font-size:11px; margin:8px 0 0; white-space:pre-wrap; word-break:break-word; color:#f0a0a0; font-family:Consolas,monospace; }
+  .banner { margin:10px 12px; padding:8px 10px; border-radius:4px; background:#3a2c14; border:1px solid #6b5220; font-size:12px; }
+  .banner.err { background:#3a1c1c; border-color:#7a2f2f; }
+  .banner code { background:#0d1218; padding:1px 5px; border-radius:3px; word-break:break-all; }
+  .bar { height:6px; background:#0d1218; border-radius:3px; overflow:hidden; margin-top:8px; display:none; }
+  .bar i { display:block; height:100%; width:0; background:var(--accent); transition:width .3s; }
+  .btnrow { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+
+  .tl { position:relative; height:30px; margin-top:8px; background:#0d1218; border-radius:4px; cursor:pointer; overflow:hidden; border:1px solid var(--line); display:none; }
+  .tl .seg { position:absolute; top:0; bottom:0; background:var(--idle); opacity:.5; } .tl .seg:hover { opacity:.85; }
+  .tl .play { position:absolute; top:0; bottom:0; width:2px; background:#fff; pointer-events:none; }
+  .tl .lbl { position:absolute; left:7px; top:7px; font-size:10px; color:var(--muted); pointer-events:none; text-shadow:0 0 4px #0d1218; }
+  .tl .lbl b { color:#c0a5f5; }
+
+  .switch { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); cursor:pointer; user-select:none; }
+  .switch input { width:auto; margin:0; }
+  .idlecfg { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted); white-space:nowrap; }
+  .idlecfg input[type=range] { width:86px; padding:0; } .idlecfg b { color:var(--text); font-weight:600; min-width:30px; display:inline-block; }
+  .hint { font-size:11px; color:var(--muted); margin-top:8px; line-height:1.5; }
+
+  #login { max-width:540px; margin:6vh auto; }
+  #login .pad > input, #login .pad > select, #login .pad > button { width:100%; margin-bottom:8px; }
+  .tabs { display:flex; gap:4px; padding:0 12px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .tabs button { background:none; color:var(--muted); border:0; border-bottom:2px solid transparent; border-radius:0; padding:9px 12px; font-size:12px; }
+  .tabs button.act { color:var(--text); border-bottom-color:var(--accent); }
+  .ms { display:flex; align-items:center; justify-content:center; gap:9px; background:#fff; color:#1b1b1b; font-weight:600; padding:11px; border-radius:4px; width:100%; }
+  .ms:hover { background:#f3f3f3; } .ms:disabled { opacity:.6; }
+  .msq { display:inline-grid; grid-template-columns:9px 9px; gap:2px; } .msq i { width:9px; height:9px; display:block; }
+  .kv { font-size:11px; color:var(--muted); margin-top:8px; } .kv b { color:var(--text); }
+  .spin { display:inline-block; width:11px; height:11px; border:2px solid #ffffff55; border-top-color:#fff; border-radius:50%; animation:sp .8s linear infinite; vertical-align:-1px; margin-right:6px; }
+  @keyframes sp { to { transform:rotate(360deg) } }
+  .pager { display:flex; gap:8px; align-items:center; padding:8px 12px; border-top:1px solid var(--line); }
+
+  #reauth { position:fixed; inset:0; background:rgba(6,9,13,.72); display:none; align-items:center; justify-content:center; z-index:50; }
+  #reauth .box { background:var(--panel); border:1px solid var(--line); border-radius:8px; max-width:440px; width:92%; padding:22px 24px; }
+  #reauth h3 { margin:0 0 8px; font-size:16px; color:var(--warn); }
+  #reauth p { color:var(--muted); font-size:13px; margin:6px 0 14px; }
+  #reauth .row { display:flex; gap:8px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CyberArk PSM Recording Viewer</h1>
+  <span class="tag" id="tagVer">UI __APP_VERSION__</span>
+  <span class="tag" id="tagFf">ffmpeg ?</span>
+  <span class="tag" id="tagIdle">idle ?</span>
+  <span class="tag" id="tagSess" style="display:none"></span>
+  <span class="muted" id="hdrInfo"></span>
+  <span class="sp"></span>
+  <button class="ghost" id="btnTheater" style="display:none">Theater</button>
+  <button class="ghost" id="btnLogout" style="display:none">Sign out</button>
+</header>
+
+<div id="reauth"><div class="box">
+  <h3>Session expired</h3>
+  <p id="reauthMsg">Your PVWA session is no longer valid. Please sign in again to continue.</p>
+  <div class="row"><button id="reauthGo">Sign in again</button><button class="ghost" id="reauthDismiss">Dismiss</button></div>
+</div></div>
+
+<div id="login" class="card" style="display:none">
+  <h2>Sign in to PVWA</h2>
+  <div id="loginExpired" class="banner err" style="display:none"></div>
+  <div class="tabs">
+    <button id="tabSso" class="act" style="display:none">Single sign-on</button>
+    <button id="tabPaste" style="display:none">Paste assertion</button>
+    <button id="tabLocal">Username &amp; password</button>
+  </div>
+  <div class="pad" id="paneSso" style="display:none">
+    <div class="muted" style="margin-bottom:10px" id="ssoTarget"></div>
+    <button class="ms" id="btnSso">
+      <span class="msq"><i style="background:#f25022"></i><i style="background:#7fba00"></i><i style="background:#00a4ef"></i><i style="background:#ffb900"></i></span>
+      <span id="ssoLabel">Sign in with Microsoft</span></button>
+    <div id="ssoMsg" class="muted" style="margin-top:10px"></div>
+    <div class="banner" id="ssoNote"></div>
+  </div>
+  <div class="pad" id="panePaste" style="display:none">
+    <div class="muted" style="margin-bottom:8px">Paste the base64 <code>SAMLResponse</code>. Nothing is written to disk.</div>
+    <textarea id="samlBlob" rows="7" style="width:100%" placeholder="PHNhbWxwOlJlc3BvbnNlIC4uLg=="></textarea>
+    <div class="kv" id="blobInfo"></div>
+    <button id="btnPasteGo" style="width:100%; margin-top:8px">Sign in with this assertion</button>
+    <div id="pasteMsg" class="muted" style="margin-top:8px"></div>
+  </div>
+  <div class="pad" id="paneLocal">
+    <div class="muted" style="margin-bottom:8px" id="loginTarget"></div>
+    <input id="u" placeholder="Username" autocomplete="username">
+    <input id="p" type="password" placeholder="Password" autocomplete="current-password">
+    <select id="authType"><option>CyberArk</option><option>LDAP</option><option>RADIUS</option><option>Windows</option></select>
+    <button id="btnLogin">Sign in</button>
+    <div id="loginMsg" class="muted"></div>
+  </div>
+  <div class="banner">Your account needs <b>View Audit</b> / Auditor rights on the relevant Safes.</div>
+</div>
+
+<div id="app" class="wrap" style="display:none">
+  <div id="listCol">
+    <div class="card">
+      <h2>Recordings<span class="sp"></span><button class="ghost" id="btnRaw">Show raw JSON</button></h2>
+      <div class="pad filters">
+        <label>Search<input id="fSearch" placeholder="user, machine, ticket..."></label>
+        <label>Safe<input id="fSafe" placeholder="Safe name"></label>
+        <label>Activities<input id="fAct" placeholder="e.g. regedit"></label>
+        <label>From<input id="fFrom" type="date"></label>
+        <label>To<input id="fTo" type="date"></label>
+        <label>Limit<input id="fLimit" type="number" value="25" min="1" style="width:80px"></label>
+        <button id="btnSearch">Search</button><button class="ghost" id="btnReset">Reset</button>
+      </div>
+      <div id="listMsg"></div>
+      <div class="pad" id="rawBox" style="display:none; padding-top:0"><pre class="raw" id="rawJson"></pre></div>
+      <div style="overflow:auto; max-height:52vh">
+        <table>
+          <thead><tr>
+            <th data-s="RiskScore">Risk</th><th data-s="PSMStartTime">Start</th>
+            <th data-s="PSMVaultUserName">Vault user</th><th data-s="AccountUserName">Account</th>
+            <th data-s="RemoteMachine">Target</th><th data-s="Protocol">Proto</th>
+            <th>Dur</th><th data-s="SafeName">Safe</th>
+          </tr></thead><tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="pager"><button class="ghost" id="btnPrev">&larr; Prev</button>
+        <button class="ghost" id="btnNext">Next &rarr;</button><span class="muted" id="pageInfo"></span></div>
+    </div>
+  </div>
+  <div id="playCol">
+    <div class="card">
+      <h2>Playback<span class="sp"></span>
+        <button class="ghost" id="btnClose" style="display:none">Close</button>
+        <button class="ghost" id="btnFull">Fullscreen</button></h2>
+      <div class="pad">
+        <div class="vidwrap" id="vidwrap"><video id="player" controls preload="metadata"></video>
+          <button class="vidclose" id="vidClose" title="Close video">&#10005;</button>
+          <div class="corner" id="vidResizer" title="Drag the corner to resize the video. Double-click to reset."></div>
+          <div class="toast" id="toast"></div></div>
+        <div class="tl" id="tl"><div class="lbl" id="tlLbl"></div><div class="play" id="tlPlay"></div></div>
+        <div class="bar" id="bar"><i id="barFill"></i></div>
+        <div id="playMsg" class="muted" style="margin-top:8px">Select a recording.</div>
+        <pre class="errlog" id="errLog" style="display:none"></pre>
+        <div class="btnrow">
+          <button id="btnPlay" disabled>Play in browser</button>
+          <button class="ghost" id="btnRetry" style="display:none">Retry transcode</button>
+          <button class="ghost" id="btnLocal" disabled>Open in local player</button>
+          <button class="ghost" id="btnDl" disabled>Download AVI</button>
+        </div>
+        <div class="btnrow" id="idleRow" style="display:none">
+          <label class="switch"><input type="checkbox" id="skipIdle" checked> Skip idle time</label>
+          <span class="idlecfg">only skip gaps over <input type="range" id="minGap" min="5" max="120" step="5" value="30"><b id="minGapVal">30s</b></span>
+          <span class="idlecfg">resume <input type="range" id="padSec" min="0" max="15" step="1" value="3"><b id="padVal">3s</b> early</span>
+          <button class="ghost" id="btnPrevAct">&larr; Prev activity</button>
+          <button class="ghost" id="btnNextAct">Next activity &rarr;</button>
+        </div>
+        <div class="hint" id="idleHint" style="display:none"></div>
+        <div class="banner" id="codecNote" style="margin:10px 0 0; display:none"></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px"><h2>Session details</h2>
+      <div class="pad"><dl id="details"><dd class="muted">&mdash;</dd></dl></div></div>
+    <div class="card" style="margin-top:12px"><h2>Activities</h2>
+      <div class="pad acts" id="acts"><span class="muted">&mdash;</span></div></div>
+  </div>
+</div>
+
+<script>
+const UI_VERSION = "__APP_VERSION__";
+const $ = s => document.querySelector(s);
+let offset=0, limit=25, sort="-PSMStartTime", current=null, caps={}, poll=null, showRaw=false;
+let idleRaw=[], idleUse=[], vidDur=0, suppressUntil=0, samlPoll=null, samlSeq=0;
+let hbPoll=null, expiredShown=false, pendingExpiry="", resetVidSize=null, applySavedVidSize=null;
+
+function pick(o,...keys){ if(!o)return undefined; const raw=o.RawProperties||{};
+  for(const k of keys)for(const src of [o,raw]){ if(src[k]!==undefined&&src[k]!==null&&src[k]!=="")return src[k];
+    const hit=Object.keys(src).find(x=>x.toLowerCase()===k.toLowerCase());
+    if(hit&&src[hit]!==undefined&&src[hit]!==null&&src[hit]!=="")return src[hit]; } return undefined; }
+const F={ id:r=>pick(r,"SessionID","SessionGuid","RecordingID","id"), start:r=>pick(r,"Start","PSMStartTime","StartTime"),
+  end:r=>pick(r,"End","PSMEndTime","EndTime"), vuser:r=>pick(r,"User","PSMVaultUserName"),
+  account:r=>pick(r,"AccountUsername","AccountUserName","UserName"), target:r=>pick(r,"RemoteMachine","PSMRemoteMachine","AccountAddress","Address"),
+  safe:r=>pick(r,"SafeName","Safe"), folder:r=>pick(r,"FolderName","Folder"), proto:r=>pick(r,"Protocol","PSMProtocol"),
+  client:r=>pick(r,"Client","PSMClientApp"), fromip:r=>pick(r,"FromIP","PSMSourceAddress"), dur:r=>pick(r,"Duration"),
+  risk:r=>pick(r,"RiskScore"), file:r=>pick(r,"FileName"), plat:r=>pick(r,"AccountPlatformID"),
+  ticket:r=>pick(r,"TicketID"), size:r=>pick(r,"VideoSize","FileSize") };
+function fmtTime(t){ if(t==null||t==="")return ""; if(typeof t==="string"&&/[-T:]/.test(t)){const d=new Date(t);return isNaN(d)?t:d.toLocaleString();}
+  const n=+t; if(!n||isNaN(n))return ""; const d=new Date(n>1e12?n:n*1000); return isNaN(d)?"":d.toLocaleString(); }
+const fmtDur=s=>{s=+s||0;const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?`${h}h ${m}m`:`${m}m ${s%60}s`;};
+const clock=s=>{s=Math.max(0,Math.round(+s||0));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
+  return h?`${h}:${String(m).padStart(2,"0")}:${String(x).padStart(2,"0")}`:`${m}:${String(x).padStart(2,"0")}`;};
+const fmtSize=b=>!b?"":(b/1048576).toFixed(1)+" MB";
+const esc=s=>(s==null?"":String(s)).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+async function api(url,opts){ const r=await fetch(url,opts); let d=null; try{d=await r.json();}catch(e){}
+  if(r.status===401&&d&&d.code==="SESSION_EXPIRED")handleExpiry(d.error); return {ok:r.ok,status:r.status,data:d}; }
+
+function handleExpiry(reason){ pendingExpiry=reason||"Your PVWA session is no longer valid.";
+  if(expiredShown)return; expiredShown=true; clearInterval(poll);
+  $("#reauthMsg").textContent=pendingExpiry; $("#reauth").style.display="flex"; }
+$("#reauthDismiss").onclick=()=>{$("#reauth").style.display="none";};
+$("#reauthGo").onclick=()=>{$("#reauth").style.display="none";showLogin(pendingExpiry);};
+function showLogin(reason){ expiredShown=false; $("#app").style.display="none"; $("#btnLogout").style.display="none";
+  $("#btnTheater").style.display="none"; $("#tagSess").style.display="none";
+  document.body.classList.remove("playing","theater");
+  const ex=$("#loginExpired"); if(reason){ex.style.display="block";ex.textContent=reason;}else ex.style.display="none";
+  $("#login").style.display="block"; boot(); }
+function startHeartbeat(){ clearInterval(hbPoll); hbPoll=setInterval(async()=>{ let d;
+  try{d=await(await fetch("/api/heartbeat")).json();}catch(e){return;} if(!d)return;
+  if(!d.signedIn||d.tokenExpired){updateSessTag(d);handleExpiry(d.expiryReason);return;} updateSessTag(d); },15000); }
+function updateSessTag(d){ const t=$("#tagSess"); if(!d||!d.signedIn){t.style.display="none";return;}
+  t.style.display="inline-block";
+  if(d.lockRemainingSec!=null){ const r=d.lockRemainingSec; t.className="tag "+(r<120?"warn":"on");
+    t.innerHTML='<span class="dot '+(r<120?"y":"g")+'"></span>locks in '+clock(r);
+    t.title="Vault LockTimeout countdown. You will be prompted to sign in again near zero."; }
+  else { t.className="tag "+(d.keepaliveOk?"on":"warn");
+    t.innerHTML='<span class="dot '+(d.keepaliveOk?"g":"y")+'"></span>session '+(d.keepalive?"kept alive":"active");
+    t.title=d.keepalive?"Keepalive pings PVWA every "+d.keepaliveIntervalSec+"s so the idle timer never elapses.":"Keepalive off; the idle timeout will end the session."; } }
+
+function showTab(w){const m={sso:["#tabSso","#paneSso"],paste:["#tabPaste","#panePaste"],local:["#tabLocal","#paneLocal"]};
+  for(const k in m){const[t,p]=m[k];if($(t))$(t).classList.toggle("act",k===w);if($(p))$(p).style.display=(k===w)?"block":"none";}}
+$("#tabSso").onclick=()=>showTab("sso"); $("#tabPaste").onclick=()=>showTab("paste"); $("#tabLocal").onclick=()=>showTab("local");
+
+async function boot(){ const {data}=await api("/api/session"); caps=data;
+  $("#tagVer").textContent="UI "+UI_VERSION;
+  if(data.version&&data.version!==UI_VERSION)document.body.insertAdjacentHTML("afterbegin",
+    '<div class="banner err" style="margin:10px">Version mismatch: server v'+esc(data.version)+' vs page v'+esc(UI_VERSION)+'. Ctrl+F5 and replace templates/index.html.</div>');
+  const ff=$("#tagFf"); ff.textContent=data.ffmpeg?"ffmpeg on":"ffmpeg off"; ff.className="tag "+(data.ffmpeg?"on":"off");
+  const ti=$("#tagIdle"); ti.textContent=data.idle?"idle skip on":"idle skip off"; ti.className="tag "+(data.idle?"on":"off");
+  $("#loginTarget").textContent=data.pvwa;
+  $("#ssoTarget").innerHTML="You will be signed in to <b>"+esc(data.pvwa)+"</b> through your identity provider.";
+  $("#hdrInfo").textContent=data.pvwa+(data.user?"  |  "+data.user+(data.authMethod?" ("+data.authMethod+")":""):"");
+  if(data.saml){ $("#tabSso").style.display="block"; $("#tabPaste").style.display="block"; const note=$("#ssoNote");
+    if(data.helper&&!data.helperError){ $("#btnSso").disabled=false; note.className="banner";
+      note.innerHTML="Uses <code>getSAMLResponse.exe</code> (Edge WebView2), so MFA including <b>FIDO2 / YubiKey</b> works. No Entra app changes."; }
+    else if(data.helperError){ $("#btnSso").disabled=true; note.className="banner err"; note.innerHTML=esc(data.helperError)+" Use <b>Paste assertion</b> instead."; }
+    else if(data.acsEnabled){ $("#btnSso").disabled=false; note.className="banner"; note.innerHTML="Browser relay - <code>"+esc(data.acs)+"</code> must be a Reply URL on the Entra app."; }
+    else { $("#btnSso").disabled=true; note.className="banner err"; note.innerHTML="No SSO helper configured. Use <b>Paste assertion</b>, or pass <code>--saml-helper</code>."; }
+    if(!expiredShown)showTab("sso"); } else showTab("local");
+  if(data.idleMin){const step=+$("#minGap").step||5;$("#minGap").min=Math.ceil(data.idleMin/step)*step;if(+$("#minGap").value<+$("#minGap").min)$("#minGap").value=$("#minGap").min;}
+  if(data.idlePad!==undefined)$("#padSec").value=data.idlePad;
+  $("#minGapVal").textContent=$("#minGap").value+"s"; $("#padVal").textContent=$("#padSec").value+"s";
+  const on=data.signedIn&&!data.tokenExpired;
+  $("#login").style.display=on?"none":"block"; $("#app").style.display=on?"grid":"none"; $("#btnLogout").style.display=on?"inline-block":"none";
+  if(on){ $("#loginExpired").style.display="none"; pendingExpiry=""; expiredShown=false; updateSessTag(data); startHeartbeat();
+    clearInterval(samlPoll); renderCodecNote(); search(); }
+  else { clearInterval(hbPoll); if(data.tokenExpired&&data.expiryReason){const ex=$("#loginExpired");ex.style.display="block";ex.textContent=data.expiryReason;} } }
+function renderCodecNote(){ const n=$("#codecNote"); n.style.display="block";
+  if(caps.ffmpeg&&caps.scpr!==false){ n.className="banner"; n.innerHTML="Classic PSM recordings use <b>SCPR</b>, which browsers cannot decode. <b>Play in browser</b> transcodes to H.264; <b>Open in local player</b> uses PSMCodec."; }
+  else if(caps.ffmpeg){ n.className="banner err"; n.innerHTML="ffmpeg has <b>no scpr decoder</b> - use a full build from gyan.dev/BtbN."; }
+  else { n.className="banner err"; n.innerHTML="<b>Transcoding disabled.</b> "+esc(caps.ffmpegError||"No --ffmpeg."); } }
+
+function watchSaml(){ clearInterval(samlPoll); samlPoll=setInterval(async()=>{ const d=(await api("/api/saml/status")).data||{};
+  if(d.signedIn){clearInterval(samlPoll);boot();return;}
+  if(d.seq&&d.seq!==samlSeq){samlSeq=d.seq; if(d.running)$("#ssoMsg").innerHTML='<span class="spin"></span>'+esc(d.message);
+    else if(!d.ok){$("#ssoMsg").innerHTML='<span style="color:#e5534b">'+esc(d.message)+'</span>';$("#btnSso").disabled=false;clearInterval(samlPoll);}} },1000); }
+$("#btnSso").onclick=async()=>{ $("#btnSso").disabled=true; const ep=(caps.helper&&!caps.helperError)?"/api/saml/helper":"/api/saml/open";
+  $("#ssoMsg").innerHTML='<span class="spin"></span>'+(ep==="/api/saml/helper"?"Opening the sign-in window - authenticate there.":"Waiting for sign-in in the other tab…");
+  const {ok,data}=await api(ep,{method:"POST"}); if(!ok){$("#ssoMsg").innerHTML='<span style="color:#e5534b">'+esc(data&&data.error)+'</span>';$("#btnSso").disabled=false;return;} watchSaml(); };
+let blobTimer=null;
+$("#samlBlob").oninput=()=>{clearTimeout(blobTimer);blobTimer=setTimeout(async()=>{const v=$("#samlBlob").value.trim();if(v.length<40){$("#blobInfo").textContent="";return;}
+  const {data}=await api("/api/saml/inspect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({samlResponse:v})});
+  if(!data||!Object.keys(data).length){$("#blobInfo").innerHTML='<span style="color:#e5534b">Could not decode as a SAML assertion.</span>';return;}
+  $("#blobInfo").innerHTML="user <b>"+esc(data.nameId||"?")+"</b>"+(data.audience?" &middot; audience <b>"+esc(data.audience)+"</b>":"")+(data.notOnOrAfter?" &middot; valid until <b>"+esc(data.notOnOrAfter)+"</b>":"");},350);};
+$("#btnPasteGo").onclick=async()=>{$("#pasteMsg").textContent="Relaying the assertion to PVWA...";
+  const {ok,data}=await api("/api/saml/paste",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({samlResponse:$("#samlBlob").value})});
+  if(ok){$("#samlBlob").value="";boot();}else $("#pasteMsg").innerHTML='<span style="color:#e5534b">'+esc(data&&data.message)+'</span>';};
+$("#btnLogin").onclick=async()=>{$("#loginMsg").textContent="Signing in...";
+  const {ok,data}=await api("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:$("#u").value,password:$("#p").value,authType:$("#authType").value})});
+  $("#p").value=""; if(ok){$("#loginMsg").textContent="";boot();}else $("#loginMsg").innerHTML='<span style="color:#e5534b">'+esc(JSON.stringify(data&&data.message))+'</span>';};
+$("#p").addEventListener("keydown",e=>{if(e.key==="Enter")$("#btnLogin").click();});
+$("#btnLogout").onclick=async()=>{await api("/api/logout",{method:"POST"});location.reload();};
+
+$("#btnRaw").onclick=()=>{showRaw=!showRaw;$("#btnRaw").textContent=showRaw?"Hide raw JSON":"Show raw JSON";$("#rawBox").style.display=showRaw?"block":"none";};
+$("#btnTheater").onclick=()=>{document.body.classList.toggle("theater");$("#btnTheater").textContent=document.body.classList.contains("theater")?"Show list":"Theater";};
+$("#btnFull").onclick=()=>{const v=$("#player");if(document.fullscreenElement)document.exitFullscreen();else(v.requestFullscreen||v.webkitRequestFullscreen||(()=>{})).call(v);};
+
+const epoch=v=>v?Math.floor(new Date(v).getTime()/1000):"";
+async function search(reset){ if(reset)offset=0; limit=+$("#fLimit").value||25;
+  const q=new URLSearchParams({limit,offset,sort,search:$("#fSearch").value.trim(),safe:$("#fSafe").value.trim(),activities:$("#fAct").value.trim(),fromTime:epoch($("#fFrom").value),toTime:epoch($("#fTo").value)});
+  $("#listMsg").innerHTML='<div class="banner">Loading...</div>'; const {ok,data}=await api("/api/recordings?"+q);
+  if(!ok){if(!(data&&data.code==="SESSION_EXPIRED"))$("#listMsg").innerHTML='<div class="banner err">'+esc(JSON.stringify(data))+'</div>';return;}
+  $("#listMsg").innerHTML=""; const recs=data.Recordings||data.recordings||data.value||[];
+  $("#rawJson").textContent=JSON.stringify(recs[0]||data,null,2);
+  $("#rows").innerHTML=recs.map(r=>{const risk=+F.risk(r)||0,tgt=F.target(r)||"";
+    return `<tr data-id="${esc(F.id(r))}"><td class="risk ${risk>=50?'hi':''}">${risk}</td><td>${esc(fmtTime(F.start(r)))}</td><td>${esc(F.vuser(r)||"")}</td><td>${esc(F.account(r)||"")}</td><td title="${esc(tgt)}">${esc(tgt)}</td><td>${esc(F.proto(r)||"")}</td><td>${esc(fmtDur(F.dur(r)))}</td><td>${esc(F.safe(r)||"")}</td></tr>`;
+  }).join("")||'<tr><td colspan="8" class="muted">No recordings matched.</td></tr>';
+  $("#pageInfo").textContent=`${data.Total!=null?"total "+data.Total+" | ":""}showing ${offset+1}-${offset+recs.length}`;
+  $("#btnPrev").disabled=offset===0; $("#btnNext").disabled=recs.length<limit;
+  document.querySelectorAll("#rows tr[data-id]").forEach(tr=>tr.onclick=()=>select(tr)); }
+document.querySelectorAll("th[data-s]").forEach(th=>th.onclick=()=>{sort=(sort===th.dataset.s)?"-"+th.dataset.s:th.dataset.s;search(true);});
+$("#btnSearch").onclick=()=>search(true);
+$("#btnReset").onclick=()=>{["fSearch","fSafe","fAct","fFrom","fTo"].forEach(i=>$("#"+i).value="");search(true);};
+$("#btnPrev").onclick=()=>{offset=Math.max(0,offset-limit);search();};
+$("#btnNext").onclick=()=>{offset+=limit;search();};
+
+async function select(tr){ clearInterval(poll);
+  document.querySelectorAll("#rows tr").forEach(x=>x.classList.remove("sel")); tr.classList.add("sel");
+  current=tr.dataset.id; document.body.classList.add("playing");
+  $("#btnTheater").style.display="inline-block"; $("#btnClose").style.display="inline-block";
+  $("#btnPlay").disabled=!caps.ffmpeg; $("#btnDl").disabled=false; $("#btnLocal").disabled=!caps.canOpenLocal;
+  $("#btnRetry").style.display="none"; $("#errLog").style.display="none"; $("#bar").style.display="none"; $("#barFill").style.width="0";
+  resetIdle();
+  $("#playMsg").textContent=caps.ffmpeg?"Ready. 'Play in browser' fetches, transcodes and scans for idle time.":"Transcoding disabled - use Open in local player or Download AVI.";
+  $("#player").removeAttribute("src"); $("#player").load();
+  const [d,a]=await Promise.all([api("/api/recordings/"+encodeURIComponent(current)),api("/api/recordings/"+encodeURIComponent(current)+"/activities")]);
+  const dd=d.data||{}; const r=(dd.Recordings&&dd.Recordings[0])||dd.Recording||dd;
+  const fields=[["Session ID",F.id(r)||current],["File",F.file(r)],["Safe",F.safe(r)],["Folder",F.folder(r)],["Vault user",F.vuser(r)],["Account",F.account(r)],["Address",pick(r,"AccountAddress","Address")],["Platform",F.plat(r)],["Target",F.target(r)],["From IP",F.fromip(r)],["Client",F.client(r)],["Protocol",F.proto(r)],["Start",fmtTime(F.start(r))],["End",fmtTime(F.end(r))],["Duration",F.dur(r)?fmtDur(F.dur(r)):""],["Size",fmtSize(F.size(r))],["Risk score",F.risk(r)],["Severity",pick(r,"Severity")],["Ticket",F.ticket(r)]].filter(([,v])=>v!==undefined&&v!==null&&v!=="");
+  $("#details").innerHTML=fields.map(([k,v])=>`<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")||'<dd class="muted">No details.</dd>';
+  const ad=a.data||{}; const acts=ad.RecordedActivities||ad.Activities||ad.activities||(r&&r.RecordedActivities)||[];
+  $("#acts").innerHTML=acts.length?acts.map(x=>typeof x==="string"?`<div>${esc(x)}</div>`:`<div>${esc(fmtTime(x.Time||x.ActivityTime||x.StartTime))} &nbsp; ${esc(x.Text||x.Name||x.Activity||x.Description||JSON.stringify(x))}</div>`).join(""):'<span class="muted">No activities recorded.</span>'; }
+
+function closeVideo(){
+  clearInterval(poll); current=null;
+  const v=$("#player"); try{v.pause();}catch(e){} v.removeAttribute("src"); v.load();
+  document.querySelectorAll("#rows tr").forEach(x=>x.classList.remove("sel"));
+  document.body.classList.remove("playing","theater");
+  $("#btnTheater").style.display="none"; $("#btnTheater").textContent="Theater";
+  $("#btnClose").style.display="none";
+  $("#btnPlay").disabled=true; $("#btnDl").disabled=true; $("#btnLocal").disabled=true;
+  $("#btnRetry").style.display="none"; $("#errLog").style.display="none"; $("#bar").style.display="none";
+  resetIdle();
+  if(resetVidSize)resetVidSize();
+  $("#playMsg").textContent="Select a recording.";
+  $("#details").innerHTML='<dd class="muted">&mdash;</dd>';
+  $("#acts").innerHTML='<span class="muted">&mdash;</span>';
+}
+$("#btnClose").onclick=closeVideo;
+$("#vidClose").onclick=closeVideo;
+
+function resetIdle(){idleRaw=[];idleUse=[];vidDur=0;$("#tl").style.display="none";$("#idleRow").style.display="none";$("#idleHint").style.display="none";}
+function applyIdleSettings(){ const min=+$("#minGap").value,pad=+$("#padSec").value; $("#minGapVal").textContent=min+"s"; $("#padVal").textContent=pad+"s";
+  idleUse=[]; for(const[a,b]of idleRaw){if((b-a)<min)continue;const end=b-pad;if(end-a<1)continue;idleUse.push([a,end]);}
+  drawTimeline(); const saved=idleUse.reduce((s,[a,b])=>s+(b-a),0); const h=$("#idleHint"); h.style.display="block";
+  h.innerHTML=idleRaw.length?`Skipping <b>${idleUse.length}</b> of ${idleRaw.length} idle stretches (${clock(saved)} of ${clock(vidDur)}). Raise <i>only skip gaps over</i> to skip less; raise <i>resume early</i> for more lead-in.`:"No idle stretches detected."; }
+function drawTimeline(){ const tl=$("#tl"),dur=vidDur||$("#player").duration||0; if(!dur||!idleRaw.length){tl.style.display="none";return;}
+  tl.style.display="block"; [...tl.querySelectorAll(".seg")].forEach(n=>n.remove()); let saved=0;
+  idleUse.forEach(([a,b])=>{saved+=b-a;const d=document.createElement("div");d.className="seg";d.style.left=(100*a/dur)+"%";d.style.width=Math.max(0.4,100*(b-a)/dur)+"%";d.title="idle "+clock(a)+" \u2192 "+clock(b)+" ("+clock(b-a)+" skipped)";tl.insertBefore(d,tl.firstChild);});
+  $("#tlLbl").innerHTML=idleUse.length?`<b>${idleUse.length} idle</b> &middot; ${clock(saved)} skippable of ${clock(dur)}`:`nothing skipped at these settings`; }
+function segAt(t){return idleUse.find(([a,b])=>t>=a&&t<b-0.15);}
+function toast(m){const el=$("#toast");el.textContent=m;el.classList.add("show");clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove("show"),1800);}
+const vid=$("#player");
+vid.addEventListener("timeupdate",()=>{const dur=vidDur||vid.duration||0;if(dur)$("#tlPlay").style.left=(100*vid.currentTime/dur)+"%";
+  if(!$("#skipIdle").checked||vid.paused||Date.now()<suppressUntil)return;const seg=segAt(vid.currentTime);
+  if(seg){const sk=seg[1]-vid.currentTime;vid.currentTime=seg[1];if(sk>1)toast("skipped "+clock(sk)+" idle");}});
+vid.addEventListener("seeked",()=>{if(segAt(vid.currentTime))suppressUntil=Date.now()+5000;});
+vid.addEventListener("loadedmetadata",()=>{vidDur=vid.duration||vidDur;drawTimeline();if(applySavedVidSize)applySavedVidSize();});
+$("#tl").onclick=e=>{const dur=vidDur||vid.duration||0;if(!dur)return;const r=e.currentTarget.getBoundingClientRect();vid.currentTime=dur*(e.clientX-r.left)/r.width;};
+$("#minGap").oninput=applyIdleSettings; $("#padSec").oninput=applyIdleSettings;
+$("#skipIdle").onchange=()=>{if($("#skipIdle").checked)suppressUntil=0;};
+$("#btnNextAct").onclick=()=>{const seg=segAt(vid.currentTime);if(seg){vid.currentTime=seg[1];return;}const n=idleUse.find(([a])=>a>vid.currentTime);if(n){vid.currentTime=n[1];toast("jumped to "+clock(n[1]));}};
+$("#btnPrevAct").onclick=()=>{const p=[...idleUse].reverse().find(([,b])=>b<vid.currentTime-1);vid.currentTime=p?p[1]:0;};
+
+async function startTranscode(force){ if(!current)return; const id=current;
+  $("#btnPlay").disabled=true;$("#btnRetry").style.display="none";$("#errLog").style.display="none";$("#bar").style.display="block";$("#playMsg").textContent="Starting...";
+  const start=await api("/api/transcode/"+encodeURIComponent(id),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({force:!!force})});
+  if(!start.ok){$("#bar").style.display="none";$("#btnPlay").disabled=false;$("#playMsg").innerHTML='<span style="color:#e5534b">'+esc(start.data&&start.data.error)+'</span>';return;}
+  clearInterval(poll); poll=setInterval(async()=>{ const {data}=await api("/api/transcode/"+encodeURIComponent(id)); if(!data||current!==id)return;
+    $("#barFill").style.width=(data.pct||0)+"%";
+    if(data.state!=="error"){let m=(data.message||data.state)+(data.pct?` (${data.pct}%)`:"");if(data.idle&&data.idle.length&&data.state==="transcoding")m+=` \u2014 ${data.idle.length} idle stretch${data.idle.length===1?"":"es"} so far`;$("#playMsg").textContent=m;}
+    if(data.state==="done"){clearInterval(poll);$("#bar").style.display="none";$("#btnPlay").disabled=false;idleRaw=data.idle||[];vidDur=data.duration||0;if(idleRaw.length)$("#idleRow").style.display="flex";applyIdleSettings();vid.src="/media/"+encodeURIComponent(id)+"?fmt=mp4";vid.load();vid.play().catch(()=>{});$("#playMsg").textContent=data.message||"Playing.";}
+    else if(data.state==="error"){clearInterval(poll);$("#bar").style.display="none";$("#btnPlay").disabled=false;if(data.expired){handleExpiry(data.message);return;}$("#btnRetry").style.display="inline-block";$("#playMsg").innerHTML='<span style="color:#e5534b">Transcode failed.</span>';const log=$("#errLog");log.style.display="block";log.textContent=(data.message||"")+(data.cmd?"\n\nCommand:\n"+data.cmd:"");}
+  },1000); }
+$("#btnPlay").onclick=()=>startTranscode(false); $("#btnRetry").onclick=()=>startTranscode(true);
+$("#btnLocal").onclick=async()=>{if(!current)return;$("#playMsg").textContent="Retrieving from the Vault and launching your player...";
+  const {ok,data}=await api("/api/open-local/"+encodeURIComponent(current),{method:"POST"});
+  $("#playMsg").innerHTML=ok?"Opened in your local player (uses the installed PSMCodec).":'<span style="color:#e5534b">'+esc(data&&data.error)+'</span>';};
+$("#btnDl").onclick=()=>{if(current)location="/download/"+encodeURIComponent(current);};
+
+/* resizable player (bottom-RIGHT corner) */
+(function(){
+  const handle=$("#vidResizer"), wrap=$("#vidwrap"), v=$("#player");
+  const MINW=240, MINH=135;
+  const maxW=()=>{ const col=document.querySelector("#playCol .card .pad"); const avail=col?col.clientWidth-24:window.innerWidth*0.6; return Math.max(MINW,Math.round(avail)); };
+  const maxH=()=>Math.max(MINH,Math.round(window.innerHeight*0.92));
+  const ratio=()=>(v.videoWidth&&v.videoHeight)?v.videoWidth/v.videoHeight:16/9;
+  let startX=0,startW=0,dragging=false;
+  function applyWidth(px,persist){ const r=ratio(); let w=Math.round(px);
+    w=Math.max(MINW,Math.min(maxW(),w)); let h=Math.round(w/r);
+    if(h>maxH()){h=maxH();w=Math.round(h*r);} if(h<MINH){h=MINH;w=Math.round(h*r);}
+    document.body.classList.add("vidresized"); const de=document.documentElement.style;
+    de.setProperty("--vidw",w+"px"); de.setProperty("--vidh",h+"px");
+    if(persist){try{localStorage.setItem("psmVidW",w);}catch(e){}} if(typeof drawTimeline==="function")drawTimeline(); }
+  function reset(){ document.body.classList.remove("vidresized"); const de=document.documentElement.style;
+    de.removeProperty("--vidw"); de.removeProperty("--vidh"); try{localStorage.removeItem("psmVidW");}catch(e){}
+    if(typeof drawTimeline==="function")drawTimeline(); }
+  function loadSaved(){ try{const s=parseInt(localStorage.getItem("psmVidW")); if(s&&s>=MINW)applyWidth(s,false);}catch(e){} }
+  resetVidSize=reset; applySavedVidSize=loadSaved;
+  function onMove(e){ if(!dragging)return; const x=(e.touches?e.touches[0].clientX:e.clientX);
+    applyWidth(startW+(x-startX),true); e.preventDefault(); }
+  function onUp(){ if(!dragging)return; dragging=false; document.body.classList.remove("resizing");
+    window.removeEventListener("mousemove",onMove);window.removeEventListener("mouseup",onUp);
+    window.removeEventListener("touchmove",onMove);window.removeEventListener("touchend",onUp); }
+  function onDown(e){ dragging=true; startX=(e.touches?e.touches[0].clientX:e.clientX);
+    startW=wrap.getBoundingClientRect().width; document.body.classList.add("resizing");
+    window.addEventListener("mousemove",onMove,{passive:false});window.addEventListener("mouseup",onUp);
+    window.addEventListener("touchmove",onMove,{passive:false});window.addEventListener("touchend",onUp); e.preventDefault(); }
+  handle.addEventListener("mousedown",onDown);
+  handle.addEventListener("touchstart",onDown,{passive:false});
+  handle.addEventListener("dblclick",reset);
+  window.addEventListener("resize",()=>{ if(!document.body.classList.contains("vidresized"))return;
+    const w=parseInt(getComputedStyle(document.documentElement).getPropertyValue("--vidw"))||0; applyWidth(w,true); });
+  loadSaved();
+})();
+
+boot();
+</script>
+</body>
+</html>
+
