@@ -1,0 +1,19 @@
+# Build outputs
+bin/
+obj/
+
+# Compiled binaries
+*.exe
+*.dll
+*.pdb
+
+# Vendor/proprietary artifacts
+vendor/
+
+# IDE
+.vs/
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store
