@@ -6,7 +6,6 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
-using PSMDispatcherUtilsManaged;
 
 namespace CyberArkHanaDispatcher
 {
@@ -51,26 +50,8 @@ namespace CyberArkHanaDispatcher
         private static int Main(string[] args)
         {
             var parsed = ParseArgs(args);
-            var missingDependencies = GetMissingDependencies();
-            if (missingDependencies.Count > 0)
-            {
-                var message = "Missing CyberArk dependencies in dispatcher folder: " + string.Join(", ", missingDependencies.ToArray());
-                Console.Error.WriteLine(message);
-                return 9;
-            }
-
-            IPSMDispatcherUtilsWrapper psm = null;
-
-            try
-            {
-                psm = new PSMDispatcherUtilsWrapper();
-                LogPsm(psm, "PSMSAPHANAStudioDispatcher started.", PSM_LOG_INFO);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine("Failed to initialize CyberArk dispatcher wrapper: " + ex.Message);
-                return 10;
-            }
+            var psm = TryCreatePsmWrapper();
+            LogPsm(psm, "PSMSAPHANAStudioDispatcher started.", PSM_LOG_INFO);
 
             var host = GetArgOrSession(parsed, psm, "host", "Address", "Machine", "Host");
             var instance = GetArgOrSession(parsed, psm, "instance", "systemnumber", "SystemNumber", "Instance");
@@ -276,7 +257,7 @@ namespace CyberArkHanaDispatcher
             return 0;
         }
 
-        private static void TrySendPid(IPSMDispatcherUtilsWrapper psm, int pid)
+        private static void TrySendPid(object psm, int pid)
         {
             if (psm == null)
             {
@@ -285,7 +266,7 @@ namespace CyberArkHanaDispatcher
 
             try
             {
-                psm.SendPID(pid);
+                InvokePsmMethod(psm, "SendPID", pid);
                 LogPsm(psm, "Sent child PID to PSM: " + pid, PSM_LOG_INFO);
             }
             catch (Exception ex)
@@ -294,7 +275,7 @@ namespace CyberArkHanaDispatcher
             }
         }
 
-        private static void TryFinalizePsm(IPSMDispatcherUtilsWrapper psm)
+        private static void TryFinalizePsm(object psm)
         {
             if (psm == null)
             {
@@ -303,14 +284,14 @@ namespace CyberArkHanaDispatcher
 
             try
             {
-                psm.FinalizeDispatcher();
+                InvokePsmMethod(psm, "FinalizeDispatcher");
             }
             catch
             {
             }
         }
 
-        private static void LogPsm(IPSMDispatcherUtilsWrapper psm, string message, int level)
+        private static void LogPsm(object psm, string message, int level)
         {
             if (psm == null)
             {
@@ -319,14 +300,14 @@ namespace CyberArkHanaDispatcher
 
             try
             {
-                psm.LogWrite(message, level);
+                InvokePsmMethod(psm, "LogWrite", message, level);
             }
             catch
             {
             }
         }
 
-        private static string GetArgOrSession(Dictionary<string, string> parsed, IPSMDispatcherUtilsWrapper psm, string argName, params string[] sessionPropertyNames)
+        private static string GetArgOrSession(Dictionary<string, string> parsed, object psm, string argName, params string[] sessionPropertyNames)
         {
             string value;
             if (parsed.TryGetValue(argName, out value) && !string.IsNullOrWhiteSpace(value))
@@ -346,7 +327,7 @@ namespace CyberArkHanaDispatcher
             return null;
         }
 
-        private static string GetSessionPropertySafe(IPSMDispatcherUtilsWrapper psm, string propName)
+        private static string GetSessionPropertySafe(object psm, string propName)
         {
             if (psm == null || string.IsNullOrWhiteSpace(propName))
             {
@@ -355,7 +336,8 @@ namespace CyberArkHanaDispatcher
 
             try
             {
-                return psm.GetSessionProperty(propName);
+                var result = InvokePsmMethod(psm, "GetSessionProperty", propName);
+                return result as string;
             }
             catch
             {
@@ -639,11 +621,11 @@ namespace CyberArkHanaDispatcher
             Console.WriteLine();
             Console.WriteLine("Notes:");
             Console.WriteLine("- If --password is omitted, HANA_PASSWORD environment variable is used.");
-            Console.WriteLine("- When run under CyberArk, missing values are read from session properties.");
-            Console.WriteLine("- Sends launched process PID to CyberArk using PSMDispatcherUtilsManaged.");
+            Console.WriteLine("- When CyberArk dispatcher DLLs are present, missing values are read from session properties.");
+            Console.WriteLine("- When CyberArk dispatcher DLLs are present, launched process PID is sent to CyberArk.");
             Console.WriteLine("- Default workspace is %LOCALAPPDATA%\\CyberArk\\hdbstudio\\workspace (override with --workspace).");
             Console.WriteLine("- Password is typed only after a window matching --password-window-title is found.");
-            Console.WriteLine("- Requires PSMDispatcherUtilsManaged.dll, PSMDispatcherUtils.dll, and PSMGenericClientDriver.dll beside this EXE.");
+            Console.WriteLine("- CyberArk DLLs are optional for building, but required for full in-session dispatcher integration.");
             Console.WriteLine("- Uses SAP's documented startup arguments: -h, -n, -u.");
         }
 
@@ -668,27 +650,47 @@ namespace CyberArkHanaDispatcher
             return Path.Combine(localAppData, "CyberArk", "hdbstudio", "workspace");
         }
 
-        private static List<string> GetMissingDependencies()
+        private static object TryCreatePsmWrapper()
         {
-            var missing = new List<string>();
-            var baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            var required = new[]
+            try
             {
-                "PSMDispatcherUtilsManaged.dll",
-                "PSMDispatcherUtils.dll",
-                "PSMGenericClientDriver.dll"
-            };
-
-            for (var i = 0; i < required.Length; i++)
-            {
-                var fullPath = Path.Combine(baseDir, required[i]);
-                if (!File.Exists(fullPath))
+                var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                var managedPath = Path.Combine(baseDir, "PSMDispatcherUtilsManaged.dll");
+                if (!File.Exists(managedPath))
                 {
-                    missing.Add(required[i]);
+                    return null;
                 }
+
+                var asm = System.Reflection.Assembly.LoadFrom(managedPath);
+                var wrapperType = asm.GetType("PSMDispatcherUtilsManaged.PSMDispatcherUtilsWrapper", false, true);
+                if (wrapperType == null)
+                {
+                    return null;
+                }
+
+                return Activator.CreateInstance(wrapperType);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static object InvokePsmMethod(object instance, string methodName, params object[] args)
+        {
+            if (instance == null || string.IsNullOrWhiteSpace(methodName))
+            {
+                return null;
             }
 
-            return missing;
+            var type = instance.GetType();
+            var method = type.GetMethod(methodName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            if (method == null)
+            {
+                return null;
+            }
+
+            return method.Invoke(instance, args);
         }
     }
 }

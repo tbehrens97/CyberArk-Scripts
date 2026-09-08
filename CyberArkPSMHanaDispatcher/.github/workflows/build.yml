@@ -19,21 +19,35 @@ jobs:
       with:
         dotnet-version: 8.0.x
 
+    - name: Check CyberArk dependencies
+      working-directory: CyberArkPSMHanaDispatcher
+      shell: pwsh
+      run: |
+        $required = @(
+          'vendor/PSMDispatcherUtilsManaged.dll',
+          'vendor/PSMDispatcherUtils.dll',
+          'vendor/PSMGenericClientDriver.dll'
+        )
+        $missing = $required | Where-Object { -not (Test-Path $_) }
+        if ($missing) {
+          Write-Error "Missing CyberArk dependencies: $($missing -join ', '). Provide them before running this workflow."
+        }
+
     - name: Restore
-      run: dotnet restore
+      working-directory: CyberArkPSMHanaDispatcher
+      run: dotnet restore CyberArkHanaDispatcher.csproj
 
     - name: Publish
+      working-directory: CyberArkPSMHanaDispatcher
       run: |
-        dotnet publish `
-          -c Release `
-          -r win-x64 `
+        dotnet publish CyberArkHanaDispatcher.csproj `
+          --configuration Release `
+          --runtime win-x64 `
           --self-contained true `
-          -p:PublishSingleFile=true `
-          -o publish
+          --output publish
 
     - name: Upload EXE
       uses: actions/upload-artifact@v4
       with:
         name: PSMSAPHANAStudioDispatcher
-        path: publish/
-`
+        path: CyberArkPSMHanaDispatcher/publish/
