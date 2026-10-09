@@ -1,0 +1,321 @@
+===============================================================================
+SAP HANA STUDIO + CYBERARK PSM - SERVER SETUP COMMANDS
+Run every block in an ELEVATED PowerShell session on each PSM server.
+Install path assumed: C:\SAP4HANA     Shadow group assumed: PSMShadowUsers
+===============================================================================
+
+
+-------------------------------------------------------------------------------
+STEP 0 - SANITY CHECK (confirm paths and group exist before changing anything)
+-------------------------------------------------------------------------------
+
+Test-Path 'C:\SAP4HANA\hdbstudio.exe'
+Test-Path 'C:\SAP4HANA\hdbstudio.ini'
+Get-LocalGroup -Name 'PSMShadowUsers'
+(Get-AppLockerPolicy -Effective).RuleCollections | Select-Object RuleCollectionType, EnforcementMode
+
+
+-------------------------------------------------------------------------------
+STEP 1 - CREATE FOLDERS
+-------------------------------------------------------------------------------
+
+New-Item 'C:\SAP4HANA\sessions' -ItemType Directory -Force | Out-Null
+New-Item 'C:\SAP4HANA\p2'       -ItemType Directory -Force | Out-Null
+
+
+-------------------------------------------------------------------------------
+STEP 2 - SET PERMISSIONS
+-------------------------------------------------------------------------------
+
+icacls 'C:\SAP4HANA' /inheritance:r /grant 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' '.\PSMShadowUsers:(OI)(CI)RX'
+icacls 'C:\SAP4HANA\sessions' /grant '.\PSMShadowUsers:(OI)(CI)M'
+icacls 'C:\SAP4HANA\p2'       /grant '.\PSMShadowUsers:(OI)(CI)M'
+
+# Verify
+icacls 'C:\SAP4HANA'          | Select-String 'PSMShadowUsers'
+icacls 'C:\SAP4HANA\sessions' | Select-String 'PSMShadowUsers'
+icacls 'C:\SAP4HANA\p2'       | Select-String 'PSMShadowUsers'
+
+
+-------------------------------------------------------------------------------
+STEP 3 - STAGE THE SWT NATIVE DLLs
+-------------------------------------------------------------------------------
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+$dest   = 'C:\SAP4HANA'
+$staged = 0
+
+Get-ChildItem "$dest\plugins" -Filter 'org.eclipse.swt.win32.win32.x86_64_*.jar' | ForEach-Object {
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($_.FullName)
+    try {
+        foreach ($entry in $zip.Entries) {
+            if ($entry.Name -like '*.dll') {
+                $target = Join-Path $dest $entry.Name
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+                Write-Host "Staged $($entry.Name)"
+                $staged++
+            }
+        }
+    } finally { $zip.Dispose() }
+}
+
+if ($staged -eq 0) { Write-Warning 'No SWT natives found - check C:\SAP4HANA\plugins.' }
+
+# Verify (expect swt-win32-*, swt-gdip-*, swt-wgl-*, swt-osversion-win32-*)
+Get-ChildItem 'C:\SAP4HANA' -Filter 'swt-*.dll' | Select-Object Name, Length
+
+
+-------------------------------------------------------------------------------
+STEP 4 - STAGE THE JNA NATIVE DLL (searches nested jars)
+-------------------------------------------------------------------------------
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+$dest   = 'C:\SAP4HANA'
+$target = Join-Path $dest 'jnidispatch.dll'
+$staged = $false
+
+function Find-JniDispatch {
+    param([System.IO.Compression.ZipArchive]$Zip, [string]$Origin)
+    foreach ($e in $Zip.Entries) {
+        if ($e.Name -eq 'jnidispatch.dll' -and $e.FullName -match 'win32-x86-64|win32-amd64|win32-x86_64') {
+            [pscustomobject]@{ Entry = $e; Origin = $Origin; Path = $e.FullName }
+        }
+        elseif ($e.Name -like '*.jar') {
+            $ms = New-Object System.IO.MemoryStream
+            $s = $e.Open(); $s.CopyTo($ms); $s.Close(); $ms.Position = 0
+            try {
+                $inner = New-Object System.IO.Compression.ZipArchive($ms, 'Read')
+                Find-JniDispatch -Zip $inner -Origin "$Origin!$($e.FullName)"
+            } catch { }
+        }
+    }
+}
+
+Get-ChildItem $dest -Recurse -Filter '*.jar' -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($staged) { return }
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($_.FullName)
+        try {
+            $hit = Find-JniDispatch -Zip $zip -Origin $_.FullName | Select-Object -First 1
+            if ($hit) {
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($hit.Entry, $target, $true)
+                Write-Host "Staged jnidispatch.dll from $($hit.Origin) ($($hit.Path))"
+                $staged = $true
+            }
+        } finally { $zip.Dispose() }
+    } catch { }
+}
+
+if (-not $staged) { Write-Warning 'jnidispatch.dll not found - use STEP 4b.' }
+
+
+-------------------------------------------------------------------------------
+STEP 4b - FALLBACK: RECOVER jnidispatch.dll FROM AN ALREADY-UNPACKED COPY
+Only if STEP 4 failed. Log on with YOUR OWN admin account (not a PSM-* account),
+run C:\SAP4HANA\hdbstudio.exe once, close it, then run this.
+-------------------------------------------------------------------------------
+
+Get-ChildItem "$env:LOCALAPPDATA\Temp\jna-*" -Recurse -Filter '*.dll' -Force | Sort-Object Length -Descending | Select-Object -First 1 | Copy-Item -Destination 'C:\SAP4HANA\jnidispatch.dll' -Force
+
+Get-Item 'C:\SAP4HANA\jnidispatch.dll' | Select-Object FullName, Length
+
+
+-------------------------------------------------------------------------------
+STEP 5 - CONFIRM jnidispatch.dll IS 64-BIT (must print 8664, not 014C)
+-------------------------------------------------------------------------------
+
+$fs = [IO.File]::OpenRead('C:\SAP4HANA\jnidispatch.dll')
+$br = New-Object IO.BinaryReader($fs)
+$fs.Position = 0x3C
+$pe = $br.ReadInt32()
+$fs.Position = $pe + 4
+'{0:X4}' -f $br.ReadUInt16()
+$br.Close(); $fs.Close()
+
+
+-------------------------------------------------------------------------------
+STEP 6 - CREATE plugin_customization.ini
+-------------------------------------------------------------------------------
+
+@'
+org.eclipse.equinox.p2.ui.sdk.scheduler/enabled=false
+org.eclipse.ui/showIntro=false
+org.eclipse.core.net/proxiesEnabled=false
+org.eclipse.core.net/systemProxiesEnabled=false
+'@ | Set-Content 'C:\SAP4HANA\plugin_customization.ini' -Encoding ASCII
+
+Get-Content 'C:\SAP4HANA\plugin_customization.ini'
+
+
+-------------------------------------------------------------------------------
+STEP 7 - PATCH hdbstudio.ini
+Backs up first. Inserts -pluginCustomization before -vmargs and appends the
+-D properties at the end. Safe to re-run (skips entries already present).
+Does NOT add -Duser.home or -configuration; the dispatcher sets those per session.
+-------------------------------------------------------------------------------
+
+$ini = 'C:\SAP4HANA\hdbstudio.ini'
+Copy-Item $ini "$ini.bak-$(Get-Date -Format yyyyMMdd-HHmmss)" -Force
+
+$lines = [System.Collections.Generic.List[string]](Get-Content $ini)
+
+if ($lines -notcontains '-pluginCustomization') {
+    $idx = $lines.IndexOf('-vmargs')
+    if ($idx -lt 0) { throw 'No -vmargs line found in hdbstudio.ini' }
+    $lines.Insert($idx, 'C:/SAP4HANA/plugin_customization.ini')
+    $lines.Insert($idx, '-pluginCustomization')
+}
+
+foreach ($prop in @('-Dswt.library.path=C:\SAP4HANA','-Djna.boot.library.path=C:\SAP4HANA')) {
+    if ($lines -notcontains $prop) { $lines.Add($prop) }
+}
+
+$lines | Set-Content $ini -Encoding ASCII
+Get-Content $ini
+
+
+-------------------------------------------------------------------------------
+STEP 7b - OPTIONAL HARDENING
+Run ONLY after STEP 3 and STEP 4/4b both succeeded. This removes the silent
+fallback to %TEMP%, so a missing DLL becomes a hard startup failure.
+-------------------------------------------------------------------------------
+
+Add-Content 'C:\SAP4HANA\hdbstudio.ini' '-Djna.nounpack=true'
+
+
+-------------------------------------------------------------------------------
+STEP 7c - OPTIONAL: BYPASS EDGE/WEBVIEW2
+Run ONLY if WebView2 cannot be allowed in AppLocker and you still see
+"Aborting Edge initialization after 5 retries with result -2147023636".
+-------------------------------------------------------------------------------
+
+Add-Content 'C:\SAP4HANA\hdbstudio.ini' '-Dorg.eclipse.swt.browser.DefaultType=ie'
+
+
+-------------------------------------------------------------------------------
+STEP 8 - CLEAN UP POISONED / BLOCKED LEFTOVERS
+-------------------------------------------------------------------------------
+
+Remove-Item 'C:\SAP4HANA\userhome' -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem 'C:\Users\PSM-*\.eclipse' -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+Get-ChildItem 'C:\Users\PSM-*\.swt'     -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+Get-ChildItem 'C:\Users\PSM-*\AppData\Local\Temp\jna-*' -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+
+
+-------------------------------------------------------------------------------
+STEP 9 - WRITE THE APPLOCKER POLICY FILE
+NOTE: this enables the Dll rule collection. If STEP 0 showed Dll as
+NotConfigured and you want it to stay off, change the Dll EnforcementMode
+below to "NotConfigured" before running.
+-------------------------------------------------------------------------------
+
+@'
+<AppLockerPolicy Version="1">
+  <RuleCollection Type="Exe" EnforcementMode="Enabled">
+    <FilePathRule Id="4f2a1c10-0001-4a11-9c01-000000000001" Name="SAP HANA Studio - install tree (EXE)" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="C:\SAP4HANA\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="4f2a1c10-0001-4a11-9c01-000000000002" Name="Edge WebView2 Runtime (EXE)" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%PROGRAMFILES%\Microsoft\EdgeWebView\Application\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="4f2a1c10-0001-4a11-9c01-000000000003" Name="Edge Core (EXE)" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%PROGRAMFILES%\Microsoft\EdgeCore\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="4f2a1c10-0001-4a11-9c01-000000000004" Name="Edge Application (EXE)" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%PROGRAMFILES%\Microsoft\Edge\Application\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="4f2a1c10-0001-4a11-9c01-000000000005" Name="CyberArk PSM Components (EXE)" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%PROGRAMFILES%\CyberArk\PSM\Components\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="4f2a1c10-0003-4a11-9c01-000000000001" Name="Deny - SAP HANA p2 writable area (EXE)" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions><FilePathCondition Path="C:\SAP4HANA\p2\*" /></Conditions>
+    </FilePathRule>
+  </RuleCollection>
+  <RuleCollection Type="Dll" EnforcementMode="Enabled">
+    <FilePathRule Id="4f2a1c10-0002-4a11-9c01-000000000001" Name="SAP HANA Studio - install tree (DLL)" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="C:\SAP4HANA\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="4f2a1c10-0002-4a11-9c01-000000000002" Name="Edge WebView2 Runtime (DLL)" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%PROGRAMFILES%\Microsoft\EdgeWebView\Application\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="4f2a1c10-0002-4a11-9c01-000000000003" Name="Edge Core (DLL)" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%PROGRAMFILES%\Microsoft\EdgeCore\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="4f2a1c10-0002-4a11-9c01-000000000004" Name="Edge Application (DLL)" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions><FilePathCondition Path="%PROGRAMFILES%\Microsoft\Edge\Application\*" /></Conditions>
+    </FilePathRule>
+    <FilePathRule Id="4f2a1c10-0003-4a11-9c01-000000000002" Name="Deny - SAP HANA p2 writable area (DLL)" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions><FilePathCondition Path="C:\SAP4HANA\p2\*" /></Conditions>
+    </FilePathRule>
+  </RuleCollection>
+</AppLockerPolicy>
+'@ | Set-Content 'C:\Temp\sap-hana-applocker.xml' -Encoding UTF8
+
+
+-------------------------------------------------------------------------------
+STEP 10 - APPLY THE APPLOCKER POLICY (LOCAL POLICY)
+For domain deployment, skip this and paste the rules into the GPO via GPMC.
+-------------------------------------------------------------------------------
+
+Set-AppLockerPolicy -XmlPolicy 'C:\Temp\sap-hana-applocker.xml' -Merge
+gpupdate /force
+Restart-Service AppIDSvc -Force
+
+# Verify the rules landed
+Get-AppLockerPolicy -Effective -Xml | Select-String 'SAP4HANA|EdgeWebView|EdgeCore'
+
+
+-------------------------------------------------------------------------------
+STEP 11 - DEPLOY THE DISPATCHER
+-------------------------------------------------------------------------------
+
+Copy-Item '<source>\PSMSAPHANAStudioDispatcher.exe' 'C:\Program Files (x86)\CyberArk\PSM\Components\' -Force
+Get-Item 'C:\Program Files (x86)\CyberArk\PSM\Components\PSMSAPHANAStudioDispatcher.exe' | Select-Object Name, Length, LastWriteTime
+
+
+-------------------------------------------------------------------------------
+STEP 12 - VERIFICATION (run after a test session)
+-------------------------------------------------------------------------------
+
+# Staged natives present
+Get-ChildItem 'C:\SAP4HANA' -Filter 'swt-*.dll' | Select-Object Name
+Get-ChildItem 'C:\SAP4HANA' -Filter 'jnidispatch.dll' | Select-Object Name, Length
+
+# Nothing leaking into shadow profiles - SHOULD RETURN NOTHING
+Get-ChildItem 'C:\Users\PSM-*\.swt','C:\Users\PSM-*\.eclipse','C:\Users\PSM-*\AppData\Local\Temp\jna-*' -ErrorAction SilentlyContinue
+
+# Per-session areas (one ses-* folder per live session)
+Get-ChildItem 'C:\SAP4HANA\sessions' | Select-Object Name, CreationTime
+
+# AppLocker denials - 8004 = blocked, 8007 = audit only
+Get-WinEvent -LogName 'Microsoft-Windows-AppLocker/EXE and DLL' -MaxEvents 100 | Where-Object Id -in 8004,8007 | Select-Object TimeCreated, Id, Message | Format-List
+
+# Latest studio log
+Get-ChildItem 'C:\Users\PSM-*\AppData\Local\CyberArk\hdbstudio\sessions\ws-*\.metadata\.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Get-Content -Tail 60
+
+
+-------------------------------------------------------------------------------
+STEP 13 - REPEAT AFTER ANY HANA STUDIO OR EDGE UPGRADE
+Versioned filenames change, and the installer rewrites hdbstudio.ini.
+-------------------------------------------------------------------------------
+
+# Re-run: STEP 3, STEP 4, STEP 7, then STEP 12
+
+
+===============================================================================
+ROLLBACK
+===============================================================================
+
+# Restore hdbstudio.ini from the most recent backup
+Get-ChildItem 'C:\SAP4HANA\hdbstudio.ini.bak-*' | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Copy-Item -Destination 'C:\SAP4HANA\hdbstudio.ini' -Force
+
+# Restore inherited permissions
+icacls 'C:\SAP4HANA' /inheritance:e
+
+# Remove staged natives
+Remove-Item 'C:\SAP4HANA\swt-*.dll','C:\SAP4HANA\jnidispatch.dll' -Force -ErrorAction SilentlyContinue
+
+# Remove per-session areas
+Remove-Item 'C:\SAP4HANA\sessions\ses-*' -Recurse -Force -ErrorAction SilentlyContinue

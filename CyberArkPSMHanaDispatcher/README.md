@@ -64,7 +64,7 @@ Passing `--workspace <path>` keeps that exact folder and disables all cleanup.
 Use this as the Client Dispatcher command in the connection component:
 
 ```text
-"{PSMComponentsFolder}\PSMSAPHANAStudioDispatcherSelectDB.exe" --studio-path "D:\SAP4HANA\hdbstudio.exe" --host "{Address}" --port "{Port}" --instance "{systemnumber}" --database "{Database}" --mode tenant --user "{UserName}" --password "{Password}" --wait-ms 30000
+"{PSMComponentsFolder}\PSMSAPHANAStudioDispatcher.exe" --studio-path "D:\SAP4HANA\hdbstudio.exe" --host "{Address}" --port "{Port}" --instance "{systemnumber}" --database "{Database}" --mode tenant --user "{UserName}" --password "{Password}" --wait-ms 30000
 ```
 
 CyberArk variable mapping used by the wizard:
@@ -109,7 +109,7 @@ This project can be built without CyberArk DLL references.
 
 ```powershell
 Set-Location "C:\Users\behret\Downloads\VS Code\CyberArkHanaDispatcher copy"
-& "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:exe /platform:x86 /optimize+ /out:PSMSAPHANAStudioDispatcherSelectDB.exe /reference:System.Windows.Forms.dll /reference:Accessibility.dll Program.cs
+& "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:exe /platform:x86 /optimize+ /out:PSMSAPHANAStudioDispatcher.exe /reference:System.Windows.Forms.dll /reference:Accessibility.dll Program.cs
 ```
 
 ## Troubleshooting

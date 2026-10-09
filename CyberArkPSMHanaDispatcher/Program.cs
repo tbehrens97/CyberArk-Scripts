@@ -234,7 +234,7 @@ namespace CyberArkHanaDispatcher
             string p;
             var studioPath = parsed.TryGetValue("studio-path", out p) && !string.IsNullOrWhiteSpace(p)
                 ? p
-                : @"C:\Program Files\sap\hdbstudio\hdbstudio.exe";
+                : ResolveStudioPath();
 
             string workspaceArg;
             var explicitWorkspace = parsed.TryGetValue("workspace", out workspaceArg) && !string.IsNullOrWhiteSpace(workspaceArg);
@@ -258,6 +258,7 @@ namespace CyberArkHanaDispatcher
                 Directory.CreateDirectory(workspacePath);
                 LogPsm(psm, "Using workspace: " + workspacePath, PSM_LOG_INFO);
                 SuppressWelcomeScreen(psm, workspacePath);
+                DisableAutomaticUpdates(psm, workspacePath);
             }
             catch (Exception ex)
             {
@@ -307,10 +308,83 @@ namespace CyberArkHanaDispatcher
             var hostWithPort = string.IsNullOrWhiteSpace(port) ? host : host + ":" + port;
             var mode = ResolveMode(parsed, database);
 
+            var arguments = "-data " + QuoteArg(workspacePath);
+            var sessionArea = PrepareStudioSessionArea(psm, studioPath);
+
+            // A per-session configuration area makes SWT extract its native DLLs under the user profile,
+            // which AppLocker blocks on hardened PSM servers, so it is opt-in only.
+            string configurationArg;
+            if (parsed.TryGetValue("configuration", out configurationArg) && !string.IsNullOrWhiteSpace(configurationArg))
+            {
+                try
+                {
+                    Directory.CreateDirectory(configurationArg);
+                    arguments += " -configuration " + QuoteArg(configurationArg);
+                }
+                catch (Exception ex)
+                {
+                    LogPsm(psm, "Could not create configuration area " + configurationArg + ": " + ex.Message, PSM_LOG_INFO);
+                }
+            }
+            else if (sessionArea != null)
+            {
+                arguments += " -configuration " + QuoteArg(Path.Combine(sessionArea, "config"));
+                arguments += " -eclipse.keyring " + QuoteArg(Path.Combine(sessionArea, "keyring"));
+            }
+
+            arguments += " -noPwdStore";
+
+            string nativeLibraryPath;
+            if (!parsed.TryGetValue("swt-library-path", out nativeLibraryPath) || string.IsNullOrWhiteSpace(nativeLibraryPath))
+            {
+                nativeLibraryPath = Path.GetDirectoryName(studioPath);
+            }
+
+            // Without these, SWT and JNA unpack their natives under the shadow profile, where AppLocker blocks them.
+            var vmArgs = new List<string>();
+            if (sessionArea != null)
+            {
+                // Equinox secure storage is DPAPI-encrypted per shadow user, so its home must not be shared.
+                vmArgs.Add("-Duser.home=" + QuoteArg(Path.Combine(sessionArea, "home")));
+            }
+
+            if (HasStagedNative(nativeLibraryPath, "swt-*.dll"))
+            {
+                vmArgs.Add("-Dswt.library.path=" + QuoteArg(nativeLibraryPath));
+            }
+
+            if (HasStagedNative(nativeLibraryPath, "jnidispatch.dll"))
+            {
+                vmArgs.Add("-Djna.boot.library.path=" + QuoteArg(nativeLibraryPath));
+                vmArgs.Add("-Djna.nounpack=true");
+            }
+
+            if (vmArgs.Count > 0)
+            {
+                // Without --launcher.appendVmargs a command line -vmargs discards the ini block, so carry it over.
+                var merged = new List<string>();
+                var iniVmArgs = LauncherAppendsVmArgs(studioPath) ? new List<string>() : ReadIniVmArgs(studioPath);
+                foreach (var iniArg in iniVmArgs)
+                {
+                    if (!DefinesSameProperty(vmArgs, iniArg))
+                    {
+                        merged.Add(QuoteArg(iniArg));
+                    }
+                }
+
+                merged.AddRange(vmArgs);
+                arguments += " -vmargs " + string.Join(" ", merged.ToArray());
+                LogPsm(psm, "Using staged natives from " + nativeLibraryPath + "; carried over " + iniVmArgs.Count + " hdbstudio.ini vmargs.", PSM_LOG_INFO);
+            }
+            else
+            {
+                LogPsm(psm, "No staged natives found in " + nativeLibraryPath + "; SWT/JNA will unpack to the user profile.", PSM_LOG_INFO);
+            }
+
             var startup = new ProcessStartInfo
             {
                 FileName = studioPath,
-                Arguments = "-data " + QuoteArg(workspacePath) + " -noPwdStore",
+                Arguments = arguments,
                 UseShellExecute = false,
                 WorkingDirectory = Path.GetDirectoryName(studioPath) ?? Environment.CurrentDirectory
             };
@@ -321,6 +395,7 @@ namespace CyberArkHanaDispatcher
                 if (child != null)
                 {
                     TrySendPid(psm, child.Id);
+                    MarkSessionAreaOwner(sessionArea, child.Id);
                 }
             }
             catch (Exception ex)
@@ -337,7 +412,7 @@ namespace CyberArkHanaDispatcher
             if (startupDelayMs > 0)
             {
                 LogPsm(psm, "Waiting " + startupDelayMs + " ms for SAP HANA Studio to load.", PSM_LOG_INFO);
-                SweepStartupPopups(startupDelayMs);
+                SweepStartupPopups(psm, startupDelayMs);
             }
 
             BeginInputLock(psm);
@@ -565,7 +640,7 @@ namespace CyberArkHanaDispatcher
             Thread.Sleep(1200);
 
             // The Secure Storage hint can surface a few seconds after the window appears.
-            SweepStartupPopups(4000);
+            SweepStartupPopups(psm, 4000);
 
             TryCloseWelcomeTab(psm, main);
 
@@ -1838,7 +1913,7 @@ namespace CyberArkHanaDispatcher
             return text.ToString();
         }
 
-        private static void SweepStartupPopups(int waitMs)
+        private static void SweepStartupPopups(object psm, int waitMs)
         {
             var deadline = DateTime.UtcNow.AddMilliseconds(waitMs);
 
@@ -1846,7 +1921,120 @@ namespace CyberArkHanaDispatcher
             {
                 TryDismissSecureStorageHint();
                 TryDismissPasswordRecoverySetup();
+                TryDismissStudioErrorDialog(psm);
+                TryDismissProblemOccurredDialog(psm);
                 Thread.Sleep(500);
+            }
+        }
+
+        // Eclipse startup failures show a plain OK dialog and point at the workspace log.
+        private static bool TryDismissStudioErrorDialog(object psm)
+        {
+            var errorWindow = FindWindowByTitleContains("Hdbstudio", null);
+            if (errorWindow == IntPtr.Zero || !WindowContainsText(errorWindow, "An error has occurred"))
+            {
+                return false;
+            }
+
+            var message = ReadDialogMessage(errorWindow);
+            Console.Error.WriteLine("SAP HANA Studio reported a startup error: " + message);
+            LogPsm(psm, "SAP HANA Studio startup error: " + message, PSM_LOG_ERROR);
+            LogStudioErrorFile(psm, message);
+
+            var okButton = FindButtonByCaption(errorWindow, "OK");
+            if (okButton != IntPtr.Zero)
+            {
+                SendMessage(okButton, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+            }
+            else
+            {
+                SetForegroundWindow(errorWindow);
+                Thread.Sleep(150);
+                SendKeys.SendWait("{ENTER}");
+            }
+
+            Thread.Sleep(400);
+            return true;
+        }
+
+        // Background job failures (decorators, p2, proxy) raise a non-fatal "Problem Occurred" dialog.
+        private static bool TryDismissProblemOccurredDialog(object psm)
+        {
+            var window = FindWindowByTitleContains("Problem Occurred", null);
+            if (window == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            LogPsm(psm, "Dismissed studio dialog: " + ReadDialogMessage(window), PSM_LOG_INFO);
+
+            var okButton = FindButtonByCaption(window, "OK");
+            if (okButton != IntPtr.Zero)
+            {
+                SendMessage(okButton, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+            }
+            else
+            {
+                SetForegroundWindow(window);
+                Thread.Sleep(150);
+                SendKeys.SendWait("{ENTER}");
+            }
+
+            Thread.Sleep(400);
+            return true;
+        }
+
+        private static string ReadDialogMessage(IntPtr window)
+        {
+            var text = new StringBuilder();
+
+            EnumChildWindows(window, (child, _) =>
+            {
+                if (!IsWindowVisible(child) || !ReadClassName(child).Equals("Static", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                var caption = ReadWindowTitle(child).Trim();
+                if (caption.Length > 0)
+                {
+                    text.Append(caption).Append(' ');
+                }
+
+                return true;
+            }, IntPtr.Zero);
+
+            return text.ToString().Replace("\r", " ").Replace("\n", " ").Trim();
+        }
+
+        private static void LogStudioErrorFile(object psm, string message)
+        {
+            var start = message.IndexOf(":\\", StringComparison.Ordinal);
+            var end = message.IndexOf(".log", StringComparison.OrdinalIgnoreCase);
+            if (start < 1 || end < start)
+            {
+                return;
+            }
+
+            var logPath = message.Substring(start - 1, (end - start) + 5).Replace(" ", string.Empty);
+
+            try
+            {
+                if (!File.Exists(logPath))
+                {
+                    return;
+                }
+
+                var lines = File.ReadAllLines(logPath);
+                var first = Math.Max(0, lines.Length - 30);
+                for (var i = first; i < lines.Length; i++)
+                {
+                    LogPsm(psm, "hdbstudio log: " + lines[i], PSM_LOG_ERROR);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogPsm(psm, "Could not read " + logPath + ": " + ex.Message, PSM_LOG_INFO);
             }
         }
 
@@ -2115,14 +2303,17 @@ namespace CyberArkHanaDispatcher
             }
 
             Console.WriteLine("Usage:");
-            Console.WriteLine("PSMSAPHANAStudioDispatcherSelectDB.exe --host <hostname> --instance <instanceNo> --user <dbUser> [--port <portNo>] [--database <tenantDb>] [--tenant <tenantDb>] [--mode single|multiple|tenant|system] [--systemnumber <instanceNo>] [--password <password>] [--studio-path <path>] [--workspace <path>] [--window-title <title>] [--password-window-title <title>] [--wait-ms <milliseconds>] [--startup-delay-ms <milliseconds>]");
+            Console.WriteLine("PSMSAPHANAStudioDispatcher.exe --host <hostname> --instance <instanceNo> --user <dbUser> [--port <portNo>] [--database <tenantDb>] [--tenant <tenantDb>] [--mode single|multiple|tenant|system] [--systemnumber <instanceNo>] [--password <password>] [--studio-path <path>] [--workspace <path>] [--configuration <path>] [--swt-library-path <dir>] [--window-title <title>] [--password-window-title <title>] [--wait-ms <milliseconds>] [--startup-delay-ms <milliseconds>]");
             Console.WriteLine();
             Console.WriteLine("Notes:");
             Console.WriteLine("- If --password is omitted, HANA_PASSWORD environment variable is used.");
             Console.WriteLine("- When CyberArk dispatcher DLLs are present, missing values are read from session properties.");
             Console.WriteLine("- When CyberArk dispatcher DLLs are present, launched process PID is sent to CyberArk.");
             Console.WriteLine("- Each run gets a fresh workspace under %LOCALAPPDATA%\\CyberArk\\hdbstudio\\sessions and older ones are deleted (override with --workspace).");
+            Console.WriteLine("- --studio-path overrides the install probe order: C:\\SAP4HANA, C:\\Program Files\\sap\\hdbstudio, C:\\Program Files (x86)\\sap\\hdbstudio.");
             Console.WriteLine("- --startup-delay-ms waits for the studio to finish loading before automation starts (default 8000).");
+            Console.WriteLine("- hdbstudio uses its installed configuration area by default; --configuration only when that area is unusable.");
+            Console.WriteLine("- --swt-library-path points SWT and JNA at a policy-allowed folder holding swt-*.dll and jnidispatch.dll; the install folder is used automatically when it contains them.");
             Console.WriteLine("- CyberArk DLLs are optional for building, but required for full in-session dispatcher integration.");
             Console.WriteLine("- hdbstudio is started only with -data and -noPwdStore; no -h, -n or -u arguments are passed.");
             Console.WriteLine("- The Add System wizard is opened by pressing the Systems view toolbar button.");
@@ -2158,6 +2349,302 @@ namespace CyberArkHanaDispatcher
             {
                 LogPsm(psm, "Could not pre-disable the Welcome page: " + ex.Message, PSM_LOG_INFO);
             }
+        }
+
+        private static void DisableAutomaticUpdates(object psm, string workspacePath)
+        {
+            try
+            {
+                var settings = Path.Combine(workspacePath, @".metadata\.plugins\org.eclipse.core.runtime\.settings");
+                Directory.CreateDirectory(settings);
+
+                var schedulerPrefs = Path.Combine(settings, "org.eclipse.equinox.p2.ui.sdk.scheduler.prefs");
+                if (!File.Exists(schedulerPrefs))
+                {
+                    File.WriteAllText(schedulerPrefs, "eclipse.preferences.version=1\nenabled=false\n");
+                }
+
+                // The update check fails noisily on isolated PSM servers, which have no repository access.
+                var netPrefs = Path.Combine(settings, "org.eclipse.core.net.prefs");
+                if (!File.Exists(netPrefs))
+                {
+                    File.WriteAllText(netPrefs, "eclipse.preferences.version=1\norg.eclipse.core.net.hasMigrated=true\nproxiesEnabled=false\nsystemProxiesEnabled=false\n");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogPsm(psm, "Could not pre-disable automatic updates: " + ex.Message, PSM_LOG_INFO);
+            }
+        }
+
+        private static bool LauncherAppendsVmArgs(string studioPath)
+        {
+            try
+            {
+                var iniPath = Path.ChangeExtension(studioPath, ".ini");
+                if (!File.Exists(iniPath))
+                {
+                    return false;
+                }
+
+                foreach (var raw in File.ReadAllLines(iniPath))
+                {
+                    if (string.Equals(raw.Trim(), "--launcher.appendVmargs", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private static List<string> ReadIniVmArgs(string studioPath)
+        {
+            var result = new List<string>();
+            try
+            {
+                var iniPath = Path.ChangeExtension(studioPath, ".ini");
+                if (!File.Exists(iniPath))
+                {
+                    return result;
+                }
+
+                var inVmArgs = false;
+                foreach (var raw in File.ReadAllLines(iniPath))
+                {
+                    var line = raw.Trim();
+                    if (line.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    if (string.Equals(line, "-vmargs", StringComparison.OrdinalIgnoreCase))
+                    {
+                        inVmArgs = true;
+                        continue;
+                    }
+
+                    if (inVmArgs)
+                    {
+                        result.Add(line);
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return result;
+        }
+
+        private static bool DefinesSameProperty(List<string> vmArgs, string candidate)
+        {
+            var separator = candidate.IndexOf('=');
+            if (!candidate.StartsWith("-D", StringComparison.Ordinal) || separator < 0)
+            {
+                return false;
+            }
+
+            var name = candidate.Substring(0, separator + 1);
+            foreach (var existing in vmArgs)
+            {
+                if (existing.StartsWith(name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool HasStagedNative(string directory, string searchPattern)
+        {
+            try
+            {
+                return !string.IsNullOrWhiteSpace(directory)
+                    && Directory.Exists(directory)
+                    && Directory.GetFiles(directory, searchPattern).Length > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string ResolveStudioPath()
+        {
+            var candidates = new[]
+            {
+                @"C:\SAP4HANA\hdbstudio.exe",
+                @"C:\Program Files\sap\hdbstudio\hdbstudio.exe",
+                @"C:\Program Files (x86)\sap\hdbstudio\hdbstudio.exe"
+            };
+
+            for (var i = 0; i < candidates.Length; i++)
+            {
+                if (File.Exists(candidates[i]))
+                {
+                    return candidates[i];
+                }
+            }
+
+            return candidates[0];
+        }
+
+        // Eclipse locks the configuration area and DPAPI keys the secure storage per user, so sessions cannot share them.
+        private static string PrepareStudioSessionArea(object psm, string studioPath)
+        {
+            try
+            {
+                var installDir = Path.GetDirectoryName(studioPath);
+                if (string.IsNullOrWhiteSpace(installDir))
+                {
+                    return null;
+                }
+
+                // Opt-in: an administrator creates the root and grants the shadow users write access.
+                var root = Path.Combine(installDir, "sessions");
+                if (!Directory.Exists(root))
+                {
+                    return null;
+                }
+
+                var area = Path.Combine(root, "ses-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Process.GetCurrentProcess().Id);
+                Directory.CreateDirectory(Path.Combine(area, "config"));
+                Directory.CreateDirectory(Path.Combine(area, "home"));
+                PurgeOldStudioSessionAreas(psm, root, area);
+                LogPsm(psm, "Using per-session studio area: " + area, PSM_LOG_INFO);
+                return area;
+            }
+            catch (Exception ex)
+            {
+                LogPsm(psm, "Could not prepare a per-session studio area: " + ex.Message, PSM_LOG_INFO);
+                return null;
+            }
+        }
+
+        private static void PurgeOldStudioSessionAreas(object psm, string root, string keepPath)
+        {
+            var removed = 0;
+            var skipped = 0;
+
+            try
+            {
+                foreach (var candidate in Directory.GetDirectories(root, "ses-*"))
+                {
+                    if (string.Equals(Path.GetFullPath(candidate).TrimEnd('\\'), Path.GetFullPath(keepPath).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    // Probe first: a recursive delete would wreck a live session before hitting its locked file.
+                    if (IsSessionAreaOwnerAlive(candidate) || IsSessionAreaInUse(candidate))
+                    {
+                        skipped++;
+                        continue;
+                    }
+
+                    if (TryDeleteDirectory(candidate))
+                    {
+                        removed++;
+                    }
+                    else
+                    {
+                        skipped++;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogPsm(psm, "Unable to list old studio session areas: " + ex.Message, PSM_LOG_INFO);
+                return;
+            }
+
+            LogPsm(psm, "Studio session cleanup: removed " + removed + ", in use " + skipped + ".", PSM_LOG_INFO);
+        }
+
+        private static void MarkSessionAreaOwner(string sessionArea, int studioPid)
+        {
+            if (string.IsNullOrWhiteSpace(sessionArea))
+            {
+                return;
+            }
+
+            try
+            {
+                File.WriteAllText(Path.Combine(sessionArea, "owner.pid"), studioPid.ToString());
+            }
+            catch
+            {
+            }
+        }
+
+        private static bool IsSessionAreaOwnerAlive(string sessionArea)
+        {
+            try
+            {
+                var ownerFile = Path.Combine(sessionArea, "owner.pid");
+                if (!File.Exists(ownerFile))
+                {
+                    // The owner is recorded just after launch, so a brand new area has not claimed one yet.
+                    return Directory.GetCreationTimeUtc(sessionArea) > DateTime.UtcNow.AddMinutes(-5);
+                }
+
+                int pid;
+                if (!int.TryParse(File.ReadAllText(ownerFile).Trim(), out pid))
+                {
+                    return false;
+                }
+
+                using (var owner = Process.GetProcessById(pid))
+                {
+                    // Guard against PID reuse by an unrelated process.
+                    return !owner.HasExited
+                        && owner.ProcessName.StartsWith("hdbstudio", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        private static bool IsSessionAreaInUse(string path)
+        {
+            try
+            {
+                foreach (var file in Directory.GetFiles(path, "*.lock", SearchOption.AllDirectories))
+                {
+                    using (File.Open(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                    {
+                    }
+                }
+
+                foreach (var file in Directory.GetFiles(path, ".fileTableLock", SearchOption.AllDirectories))
+                {
+                    using (File.Open(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                    {
+                    }
+                }
+            }
+            catch (IOException)
+            {
+                return true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return true;
+            }
+
+            return false;
         }
 
         private static string GetSessionWorkspaceRoot()
@@ -2229,14 +2716,14 @@ namespace CyberArkHanaDispatcher
                     continue;
                 }
 
-                if (TryDeleteDirectory(candidate))
+                // A locked .metadata means another studio instance still owns that workspace.
+                if (IsSessionAreaInUse(candidate) || !TryDeleteDirectory(candidate))
                 {
-                    removed++;
+                    skipped++;
                 }
                 else
                 {
-                    // A locked .metadata means another studio instance still owns that workspace.
-                    skipped++;
+                    removed++;
                 }
             }
 
